@@ -167,9 +167,8 @@ Uses lower triangular masking to ensure autoregressive generation (tokens can on
 
 
 **Expected Performance**:
-- Initial loss: ~4.3 (random predictions)
-- Final loss: ~1.4-1.6 (good Shakespeare-style generation)
-- **Lower validation loss indicates better generalization**
+- Initial loss: ~5.3 (random predictions)
+- Final loss: ~1.0 (good Shakespeare-style generation)
 
 
 
