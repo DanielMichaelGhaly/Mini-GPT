@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-batch_size = 32
-block_size = 8
+batch_size = 64
+block_size = 256
 max_iters = 5000
 eval_interval = 500
-device = 'cuda'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-learning_rate = 1e-3
-n_embd = 32
+learning_rate = 3e-4
+n_embd = 384
+dropout = 0.2
 
 torch.manual_seed(1337)
 
@@ -66,14 +67,17 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self,x):
         B,T,C = x.shape
         k = self.key(x)
         q = self.query(x)
         v = self.value(x)
-        wei = (q @ k.transpose(-2,-1)) / (k.shape[-1] ** 0.5)
+        wei = (q @ k.transpose(-2,-1)) * C**-0.5
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
         out = wei @ v
         return out
 
@@ -82,9 +86,12 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-
+        self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
     def forward(self,x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
 
 class FeedForward(nn.Module):
 
@@ -93,14 +100,29 @@ class FeedForward(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, n_embd),
+            nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self,x):
         return self.net(x)
 
+class Block(nn.Module):
 
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self,x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
 class BigramLanguageModel(nn.Module):
 
@@ -109,18 +131,24 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         # layer that maps a vector of size n_embd to one of size vocab_size(embedding or logit)
-        self.sa_heads = MultiHeadAttention(4, n_embd//4)
+        # self.sa_heads = MultiHeadAttention(4, n_embd//4)
+        # self.ffwd = FeedForward(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            nn.LayerNorm(n_embd),
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)
-        self.ffwd = FeedForward(n_embd)
-
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both (B, T) tensor of integers
         tok_emb = self.token_embedding_table(idx)  # (B, T, C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
-        x = self.sa_heads(x)
-        x = self.ffwd(x)
+        x = self.blocks(x)
+        # x = self.sa_heads(x)
+        # x = self.ffwd(x)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
@@ -157,7 +185,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 for iter in range(max_iters):
 
     # every once in a while evaluate loss on train and val sets
-    if iter % eval_interval == 0:
+    if iter % eval_interval == 0 or iter == max_iters-1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
