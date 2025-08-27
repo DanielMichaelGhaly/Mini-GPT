@@ -71,8 +71,9 @@ class Head(nn.Module):
         k = self.key(x)
         q = self.query(x)
         v = self.value(x)
-        wei = q @ k.transpose(-2,-1)
+        wei = (q @ k.transpose(-2,-1)) / (k.shape[-1] ** 0.5)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
         out = wei @ v
         return out
 
@@ -85,6 +86,22 @@ class MultiHeadAttention(nn.Module):
     def forward(self,x):
         return torch.cat([h(x) for h in self.heads], dim=-1)
 
+class FeedForward(nn.Module):
+
+    # Simple linear layer followed by a non-linear one
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU(),
+        )
+
+    def forward(self,x):
+        return self.net(x)
+
+
+
 class BigramLanguageModel(nn.Module):
 
     def __init__(self, vocab_size):
@@ -92,8 +109,10 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         # layer that maps a vector of size n_embd to one of size vocab_size(embedding or logit)
-        self.sa_heads = MultiHeadAttention(4, n_embd/4)
+        self.sa_heads = MultiHeadAttention(4, n_embd//4)
         self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.ffwd = FeedForward(n_embd)
+
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both (B, T) tensor of integers
@@ -101,10 +120,12 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
         x = self.sa_heads(x)
-        logits = self.lm_head(tok_emb) # (B,T,vocab_size)
+        x = self.ffwd(x)
+        logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
             loss = None
+
         else:
             B, T, C = logits.shape
             logits = logits.view(B * T, C)
@@ -117,7 +138,7 @@ class BigramLanguageModel(nn.Module):
             # Crop idx to the last block_size tokens
             idx_cond = idx[:, -block_size:]
             # get predictions
-            logits, loss = self(idx)
+            logits, loss = self(idx_cond)
             # focus on last time step (T)
             logits = logits[:, -1, :]
             # apply softmax to get probability distribution
